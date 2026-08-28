@@ -1,277 +1,288 @@
 import os
+import json
 import re
 import requests
+from http.server import BaseHTTPRequestHandler
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-BOT_TOKEN = os.environ["8479494858:AAHmQX9CQ09rF9mM0nAhfLQrev438S_FOa8"]
-
-API_URL = "https://api.g-sheba.top/csms/haf.php"
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+SMS_API = "https://api.g-sheba.top/csms/haf.php"
 
 PHONE_RE = re.compile(r"^01[3-9]\d{8}$")
 
 
-def menu():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📨 Send SMS",
-                callback_data="send_sms"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "👨‍💻 Developer: Efty67",
-                callback_data="developer"
-            )
+def telegram(method, data=None):
+    r = requests.post(
+        f"{TELEGRAM_API}/{method}",
+        json=data or {},
+        timeout=15
+    )
+    return r.json()
+
+
+def send_message(chat_id, text, reply_markup=None):
+    data = {
+        "chat_id": chat_id,
+        "text": text
+    }
+
+    if reply_markup:
+        data["reply_markup"] = reply_markup
+
+    return telegram("sendMessage", data)
+
+
+def main_menu():
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "📨 Send SMS",
+                    "callback_data": "send_sms"
+                }
+            ],
+            [
+                {
+                    "text": "👨‍💻 Developer: Efty67",
+                    "callback_data": "developer"
+                }
+            ]
         ]
-    ])
+    }
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-
-    await update.message.reply_text(
+def handle_start(chat_id):
+    send_message(
+        chat_id,
         "🤖 Efty SMS Bot\n\n"
         "নিচের button থেকে SMS পাঠানো শুরু করুন।",
-        reply_markup=menu()
+        main_menu()
     )
 
 
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+def handle_callback(callback):
+    callback_id = callback["id"]
+    data = callback.get("data", "")
+    message = callback.get("message", {})
 
-    if query.data == "developer":
-        await query.message.reply_text(
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
+
+    telegram("answerCallbackQuery", {
+        "callback_query_id": callback_id
+    })
+
+    if data == "developer":
+        send_message(
+            chat_id,
             "👨‍💻 Developer: Efty67\n"
             "📞 Contact: @Efty67",
-            reply_markup=menu()
+            main_menu()
         )
 
-    elif query.data == "send_sms":
-        context.user_data["step"] = "phone"
-
-        await query.message.reply_text(
-            "📱 Receiver number দিন:\n\n"
-            "Example: `01712345678`",
-            parse_mode="Markdown"
+    elif data == "send_sms":
+        send_message(
+            chat_id,
+            "📱 Step 1/2\n\n"
+            "Receiver-এর বাংলাদেশি mobile number পাঠান।\n\n"
+            "Example:\n"
+            "01712345678"
         )
 
 
-async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    step = context.user_data.get("step")
+def process_text(message):
+    chat_id = message["chat"]["id"]
+    text = message.get("text", "").strip()
 
-    if step == "phone":
+    if text == "/start":
+        handle_start(chat_id)
+        return
 
-        phone = update.message.text.strip()
-        phone = phone.replace(" ", "").replace("-", "")
+    # User replied to a bot prompt
+    replied = message.get("reply_to_message")
 
-        if not PHONE_RE.fullmatch(phone):
-            await update.message.reply_text(
-                "❌ ভুল নম্বর।\n\n"
-                "বাংলাদেশি 11 digit mobile number দিন।\n"
-                "Example: 01712345678"
-            )
-            return
+    if replied:
+        replied_text = replied.get("text", "")
 
-        context.user_data["phone"] = phone
-        context.user_data["step"] = "message"
+        # Step 2: SMS message
+        if replied_text.startswith("📱 Number accepted:"):
+            number = replied_text.split(":", 1)[1].strip()
 
-        await update.message.reply_text(
-            "✉️ এখন SMS message লিখুন:"
-        )
+            if not PHONE_RE.fullmatch(number):
+                send_message(chat_id, "❌ Invalid number.")
+                return
 
-    elif step == "message":
+            if not text:
+                send_message(chat_id, "❌ Message খালি হতে পারবে না।")
+                return
 
-        sms = update.message.text.strip()
-
-        if not sms:
-            await update.message.reply_text(
-                "❌ Message খালি রাখা যাবে না।"
-            )
-            return
-
-        if len(sms) > 500:
-            await update.message.reply_text(
-                "❌ Message সর্বোচ্চ 500 characters হতে পারবে।"
-            )
-            return
-
-        context.user_data["sms"] = sms
-        context.user_data["step"] = "confirm"
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "✅ Send",
-                    callback_data="confirm_send"
-                ),
-                InlineKeyboardButton(
-                    "❌ Cancel",
-                    callback_data="cancel"
+            if len(text) > 500:
+                send_message(
+                    chat_id,
+                    "❌ Message maximum 500 characters হতে পারবে।"
                 )
-            ]
-        ])
+                return
 
-        await update.message.reply_text(
-            "📋 *SMS Details*\n\n"
-            f"📱 Number: `{context.user_data['phone']}`\n"
-            f"✉️ Message: `{sms}`\n\n"
-            "Send করবেন?",
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-
-
-async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "cancel":
-
-        context.user_data.clear()
-
-        await query.message.reply_text(
-            "❌ Cancelled.",
-            reply_markup=menu()
-        )
-
-        return
-
-    if query.data != "confirm_send":
-        return
-
-    phone = context.user_data.get("phone")
-    sms = context.user_data.get("sms")
-
-    if not phone or not sms:
-
-        await query.message.reply_text(
-            "⚠️ Session expired.\n"
-            "আবার /start দিন।"
-        )
-
-        return
-
-    try:
-
-        response = requests.get(
-            API_URL,
-            params={
-                "number": phone,
-                "sms": sms
-            },
-            timeout=15
-        )
-
-        if response.ok:
-
-            result = response.text[:1000]
-
-            await query.message.reply_text(
-                "✅ API Request Sent!\n\n"
-                f"📱 Number: {phone}\n"
-                f"✉️ Message: {sms}\n\n"
-                f"API Response:\n{result}",
-                reply_markup=menu()
+            confirmation = (
+                "📋 SMS Confirmation\n\n"
+                f"📱 Number: {number}\n\n"
+                f"✉️ Message:\n{text}\n\n"
+                "উপরের SMS পাঠাতে চাইলে এই message-এ "
+                "YES reply করুন।\n\n"
+                "Cancel করতে NO reply করুন।"
             )
 
-        else:
+            send_message(chat_id, confirmation)
+            return
 
-            await query.message.reply_text(
-                f"❌ API Error: HTTP {response.status_code}",
-                reply_markup=menu()
+        # Step 3: Confirmation
+        if replied_text.startswith("📋 SMS Confirmation"):
+            answer = text.lower()
+
+            if answer not in ("yes", "no"):
+                send_message(
+                    chat_id,
+                    "⚠️ এই message-এ শুধু YES অথবা NO reply করুন।"
+                )
+                return
+
+            if answer == "no":
+                send_message(
+                    chat_id,
+                    "❌ SMS cancelled.",
+                    main_menu()
+                )
+                return
+
+            # Parse number
+            number_match = re.search(
+                r"📱 Number:\s*(01[3-9]\d{8})",
+                replied_text
             )
 
-    except Exception as e:
+            # Parse message
+            message_match = re.search(
+                r"✉️ Message:\n(.*?)\n\nউপরের SMS",
+                replied_text,
+                re.S
+            )
 
-        await query.message.reply_text(
-            f"❌ Request failed:\n{str(e)[:500]}",
-            reply_markup=menu()
+            if not number_match or not message_match:
+                send_message(
+                    chat_id,
+                    "❌ Confirmation data পাওয়া যায়নি। আবার /start দিন।"
+                )
+                return
+
+            number = number_match.group(1)
+            sms = message_match.group(1)
+
+            try:
+                response = requests.get(
+                    SMS_API,
+                    params={
+                        "number": number,
+                        "sms": sms
+                    },
+                    timeout=15
+                )
+
+                if response.ok:
+                    result = response.text[:1500]
+
+                    send_message(
+                        chat_id,
+                        "✅ API Request Completed!\n\n"
+                        f"📱 Number: {number}\n"
+                        f"✉️ Message: {sms}\n\n"
+                        f"API Response:\n{result}",
+                        main_menu()
+                    )
+                else:
+                    send_message(
+                        chat_id,
+                        f"❌ API Error\nHTTP Status: {response.status_code}",
+                        main_menu()
+                    )
+
+            except Exception as e:
+                send_message(
+                    chat_id,
+                    "❌ API connection failed.\n\n"
+                    f"{str(e)[:500]}",
+                    main_menu()
+                )
+
+            return
+
+    # Step 1: number
+    if PHONE_RE.fullmatch(text):
+        send_message(
+            chat_id,
+            f"📱 Number accepted: {text}\n\n"
+            "✉️ Step 2/2\n\n"
+            "এখন এই message-এ Reply করে আপনার SMS লিখুন।"
+        )
+        return
+
+    send_message(
+        chat_id,
+        "⚠️ বুঝতে পারিনি। /start দিন।"
+    )
+
+
+def process_update(update):
+    if "callback_query" in update:
+        handle_callback(update["callback_query"])
+
+    elif "message" in update:
+        process_text(update["message"])
+
+
+class handler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(
+            b"Efty SMS Bot is running!"
         )
 
-    finally:
+    def do_POST(self):
+        try:
+            length = int(
+                self.headers.get("Content-Length", 0)
+            )
 
-        context.user_data.clear()
+            body = self.rfile.read(length)
+            update = json.loads(body.decode("utf-8"))
 
+            process_update(update)
 
-# Telegram application
-application = (
-    Application.builder()
-    .token(BOT_TOKEN)
-    .build()
-)
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "application/json"
+            )
+            self.end_headers()
 
-application.add_handler(
-    CommandHandler("start", start)
-)
+            self.wfile.write(
+                b'{"ok":true}'
+            )
 
-application.add_handler(
-    CallbackQueryHandler(
-        confirm,
-        pattern="^(confirm_send|cancel)$"
-    )
-)
+        except Exception as e:
+            self.send_response(500)
+            self.send_header(
+                "Content-Type",
+                "application/json"
+            )
+            self.end_headers()
 
-application.add_handler(
-    CallbackQueryHandler(
-        buttons,
-        pattern="^(send_sms|developer)$"
-    )
-)
-
-application.add_handler(
-    MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        messages
-    )
-)
-
-
-async def process_update(request):
-
-    data = await request.json()
-
-    update = Update.de_json(
-        data,
-        application.bot
-    )
-
-    await application.initialize()
-    await application.process_update(update)
-    await application.shutdown()
-
-
-# Vercel Python Function
-async def handler(request):
-
-    if request.method != "POST":
-        return {
-            "statusCode": 200,
-            "body": "Efty SMS Bot is running!"
-        }
-
-    try:
-
-        await process_update(request)
-
-        return {
-            "statusCode": 200,
-            "body": "OK"
-        }
-
-    except Exception as e:
-
-        return {
-            "statusCode": 500,
-            "body": str(e)
-        }
+            self.wfile.write(
+                json.dumps({
+                    "ok": False,
+                    "error": str(e)
+                }).encode()
+            )
